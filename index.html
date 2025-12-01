@@ -67,8 +67,15 @@
             return btoa(String.fromCharCode(...uint8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         }
 
-        function cleanBuffer(bufferView) {
-            return new Uint8Array(bufferView.buffer.slice(bufferView.byteOffset, bufferView.byteOffset + bufferView.byteLength));
+        // Safe conversion to ArrayBuffer for CBOR.decode
+        function decodeCBOR(view) {
+            const cleanArray = new Uint8Array(view); // Copy to new typed array
+            return CBOR.decode(cleanArray.buffer);   // Pass underlying ArrayBuffer
+        }
+
+        // Helper to extract clean bytes from a potential view
+        function getBytes(view) {
+            return new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
         }
 
         function getField(obj, key) {
@@ -77,39 +84,29 @@
             return null;
         }
 
-        // --- 2. MANUAL SIGNATURE BUILDER (The Fix) ---
+        // --- 2. MANUAL SIGNATURE BUILDER ---
         function encodeBytes(data) {
-            // Encodes data as CBOR Byte String (Major Type 2)
             let prefix = [];
             let len = data.length;
             if (len < 24) prefix.push(0x40 | len);
             else if (len < 256) prefix.push(0x58, len);
             else if (len < 65536) prefix.push(0x59, (len >> 8) & 0xFF, len & 0xFF);
             else prefix.push(0x5A, (len >>> 24), (len >>> 16) & 0xFF, (len >>> 8) & 0xFF, len & 0xFF);
-            
             const res = new Uint8Array(prefix.length + data.length);
-            res.set(prefix);
-            res.set(data, prefix.length);
+            res.set(prefix); res.set(data, prefix.length);
             return res;
         }
 
         function createToBeSigned(protHeader, payload) {
-            // Manually build Sig_Structure to match Python exactly
-            // Sig_structure = ["Signature1", protHeader, external_aad(empty), payload]
-            
-            // "Signature1" encoded
             const sig1 = new Uint8Array([0x6A, 0x53, 0x69, 0x67, 0x6E, 0x61, 0x74, 0x75, 0x72, 0x65, 0x31]);
-            // Encoded Bytes
             const hBstr = encodeBytes(protHeader);
-            const aBstr = new Uint8Array([0x40]); // Empty AAD
+            const aBstr = new Uint8Array([0x40]); 
             const pBstr = encodeBytes(payload);
             
-            // Wrap in Array(4) -> 0x84
             const totalLen = 1 + sig1.length + hBstr.length + aBstr.length + pBstr.length;
             const res = new Uint8Array(totalLen);
             let offset = 0;
-            res[offset++] = 0x84;
-            
+            res[offset++] = 0x84; 
             res.set(sig1, offset); offset += sig1.length;
             res.set(hBstr, offset); offset += hBstr.length;
             res.set(aBstr, offset); offset += aBstr.length;
@@ -165,20 +162,22 @@
             try {
                 if (qrString.startsWith("HC1:")) qrString = qrString.substring(4);
                 
+                // 1. Inflate
                 const compressed = base45Decode(qrString);
                 const cwtBytes = pako.inflate(compressed);
                 
-                // Decode COSE Wrapper
-                let cose = CBOR.decode(cleanBuffer({buffer: cwtBytes.buffer, byteOffset: 0, byteLength: cwtBytes.length}));
+                // 2. Decode COSE (Fix: Use decodeCBOR helper)
+                let cose = decodeCBOR(cwtBytes);
                 if (cose && typeof cose === 'object' && !Array.isArray(cose) && cose.tag === 18) cose = cose.value;
                 
-                // Extract Parts
-                const protHeaderBytes = cleanBuffer({buffer: cose[0].buffer || cose[0], byteOffset: 0, byteLength: cose[0].length});
+                // 3. Extract Headers & Payload
+                // Note: cose[0] is protHeader, cose[2] is payload. Both are byte arrays.
+                // We use getBytes to ensure we have a clean Uint8Array for the Signature Builder
+                const protHeaderBytes = getBytes(cose[0]);
+                const payloadBytes = getBytes(cose[2]);
                 const signature = cose[3];
-                // Payload is in cose[2]. Clean it to ensure it's a pure Uint8Array
-                const payloadBytes = cleanBuffer({buffer: cose[2].buffer || cose[2], byteOffset: 0, byteLength: cose[2].length});
 
-                // MANUALLY Construct "To Be Signed" (The Fix)
+                // 4. Manually Reconstruct "To Be Signed" Bytes
                 const ToBeSigned = createToBeSigned(protHeaderBytes, payloadBytes);
 
                 if (!publicKey) { alert("Public Key not loaded."); return; }
@@ -188,15 +187,15 @@
                     publicKey, signature, ToBeSigned
                 );
 
-                // Decode Payload for Display
-                const data = CBOR.decode(payloadBytes.buffer);
+                // 5. Decode Payload (Fix: Use decodeCBOR helper)
+                const data = decodeCBOR(payloadBytes);
                 
+                // Debug View
                 document.getElementById("debugInfo").innerText = "RAW: " + JSON.stringify(data);
 
                 if (valid) {
                     showResult(true, data);
                 } else {
-                    // Even if signature fails, try to show data but mark as fake
                     showResult(false, data);
                 }
 
@@ -217,7 +216,6 @@
             const header = document.getElementById("verifyHeader");
             card.style.display = "block";
             
-            // Extract Data
             let name = "Unknown";
             const rawName = getField(data, 7);
             if (rawName) {
