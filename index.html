@@ -100,7 +100,7 @@
     </div>
 
     <script>
-        // --- 1. INTERNAL BASE45 DECODER (Fixes the "cant find variable" error) ---
+        // --- 1. INTERNAL BASE45 DECODER ---
         const B45_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
         const B45_MAP = {};
         for (let i = 0; i < B45_CHARSET.length; i++) B45_MAP[B45_CHARSET[i]] = i;
@@ -108,49 +108,50 @@
         function base45Decode(str) {
             const output = [];
             for (let i = 0; i < str.length; i += 3) {
-                if (i + 1 >= str.length) break; // Safety check
+                if (i + 1 >= str.length) break; 
                 const char0 = B45_MAP[str[i]];
                 const char1 = B45_MAP[str[i + 1]];
                 const char2 = (i + 2 < str.length) ? B45_MAP[str[i + 2]] : null;
-
                 if (char2 === null) {
-                    // 2 characters -> 1 byte
                     const val = char0 + (char1 * 45);
                     output.push(val);
                 } else {
-                    // 3 characters -> 2 bytes
                     const val = char0 + (char1 * 45) + (char2 * 45 * 45);
-                    output.push(val >> 8);    // High byte
-                    output.push(val & 0xFF);  // Low byte
+                    output.push(val >> 8);    
+                    output.push(val & 0xFF);  
                 }
             }
             return new Uint8Array(output);
         }
 
-        // --- 2. CONFIGURATION & KEYS ---
+        // --- 2. KEYS & UTILS ---
         let publicKey = null;
 
         fetch('public_key.json').then(r => r.json()).then(jwk => {
             const x = base45Decode(jwk.x);
             const y = base45Decode(jwk.y);
-            
             window.crypto.subtle.importKey(
                 "jwk", 
                 { kty: "EC", crv: "P-256", x: toBase64Url(x), y: toBase64Url(y), ext: true },
                 { name: "ECDSA", namedCurve: "P-256" },
                 true, ["verify"]
-            ).then(key => { publicKey = key; console.log("Public Key Loaded"); })
-             .catch(e => {
-                 console.error(e);
-                 alert("Error loading public_key.json. Ensure it is in the same folder.");
-             });
+            ).then(key => { publicKey = key; console.log("Key Loaded"); })
+             .catch(e => alert("Error: public_key.json missing or invalid."));
         });
 
         function toBase64Url(uint8) {
             return btoa(String.fromCharCode(...uint8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         }
 
-        // --- 3. CAMERA & SCANNING ---
+        function cleanBuffer(bufferView) {
+            // Helper to extract the EXACT bytes from a larger memory buffer
+            return bufferView.buffer.slice(
+                bufferView.byteOffset, 
+                bufferView.byteOffset + bufferView.byteLength
+            );
+        }
+
+        // --- 3. CAMERA ---
         const video = document.createElement("video");
         const canvas = document.getElementById("canvas");
         const ctx = canvas.getContext("2d");
@@ -158,17 +159,14 @@
 
         function startScan() {
             resultCard.style.display = "none";
-            document.getElementById("status").innerText = "Searching for QR code...";
-            
+            document.getElementById("status").innerText = "Searching...";
             navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(stream => {
                 video.srcObject = stream;
                 video.setAttribute("playsinline", true);
                 video.play();
                 requestAnimationFrame(tick);
                 canvas.style.display = "block";
-            }).catch(err => {
-                alert("Camera Error: " + err);
-            });
+            }).catch(err => alert("Camera Error: " + err));
         }
 
         function tick() {
@@ -178,38 +176,28 @@
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                 const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
                 const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
-
-                if (code) {
-                    processQR(code.data);
-                    return;
-                }
+                if (code) { processQR(code.data); return; }
             }
             requestAnimationFrame(tick);
         }
 
-        // --- 4. VERIFICATION LOGIC ---
+        // --- 4. VERIFICATION LOGIC (FIXED) ---
         async function processQR(qrString) {
-            document.getElementById("status").innerText = "Verifying Signature...";
+            document.getElementById("status").innerText = "Verifying...";
             
             try {
                 if (qrString.startsWith("HC1:")) qrString = qrString.substring(4);
                 
-                // Step A: Base45 Decode (Using our internal function)
+                // 1. Base45 -> Compressed Bytes
                 const compressed = base45Decode(qrString);
                 
-                // Step B: Zlib Decompress
+                // 2. Decompress -> COSE Bytes
                 const cwtBytes = pako.inflate(compressed);
 
-                // Step C: Fix Pako/CBOR Buffer Issue
-                const cleanBuffer = cwtBytes.buffer.slice(
-                    cwtBytes.byteOffset, 
-                    cwtBytes.byteOffset + cwtBytes.byteLength
-                );
+                // 3. Decode COSE Envelope
+                // CRITICAL FIX: Slice buffer to ensure clean CBOR decoding
+                let cose = CBOR.decode(cleanBuffer(cwtBytes));
 
-                // Step D: CBOR Decode
-                let cose = CBOR.decode(cleanBuffer);
-
-                // Unwrap Tag 18 if present
                 if (cose && typeof cose === 'object' && !Array.isArray(cose) && cose.tag === 18) {
                     cose = cose.value;
                 }
@@ -218,28 +206,21 @@
 
                 const [protHeaderBytes, unprotMap, payloadBytes, signature] = cose;
 
-                const Sig_structure = [
-                    "Signature1",
-                    protHeaderBytes,
-                    new Uint8Array(0),
-                    payloadBytes
-                ];
-                
+                // 4. Verify Signature
+                const Sig_structure = [ "Signature1", protHeaderBytes, new Uint8Array(0), payloadBytes ];
                 const ToBeSigned = CBOR.encode(Sig_structure);
 
-                if (!publicKey) {
-                    alert("Public Key not loaded yet!");
-                    return;
-                }
+                if (!publicKey) { alert("Public Key not loaded."); return; }
 
                 const valid = await window.crypto.subtle.verify(
                     { name: "ECDSA", hash: { name: "SHA-256" } },
-                    publicKey,
-                    signature,
-                    ToBeSigned
+                    publicKey, signature, ToBeSigned
                 );
 
-                const data = CBOR.decode(payloadBytes.buffer);
+                // 5. Decode Payload (The ID Data)
+                // CRITICAL FIX: Must clean the payloadBytes buffer before decoding 
+                // otherwise it reads the parent COSE object again.
+                const data = CBOR.decode(cleanBuffer(payloadBytes));
                 
                 if (valid) {
                     showResult(true, data);
@@ -249,8 +230,8 @@
 
             } catch (err) {
                 console.error(err);
-                document.getElementById("status").innerText = "SCAN FAILED";
-                alert("Error processing QR: " + err.message);
+                document.getElementById("status").innerText = "ERROR";
+                alert("Scan Error: " + err.message);
                 resultCard.style.display = "none";
             }
         }
@@ -269,15 +250,18 @@
                 header.style.color = "#28a745";
                 card.style.border = "2px solid #28a745";
                 
-                // Decode Name (Internal Base45)
+                // Extract Data safely
                 let name = "Unknown";
-                if (data[7]) {
-                    const nameBytes = base45Decode(data[7]); 
+                
+                // Check if name is in Key 7 (int) or Key "7" (string)
+                const rawName = data[7] || data["7"];
+                if (rawName) {
+                    const nameBytes = base45Decode(rawName); 
                     name = new TextDecoder().decode(nameBytes);
                 }
 
                 document.getElementById("resName").innerText = name;
-                document.getElementById("resIssuer").innerText = data[1] || "Unknown";
+                document.getElementById("resIssuer").innerText = data[1] || data["1"] || "Unknown";
                 document.getElementById("resRole").innerText = data["role"] || "-";
                 document.getElementById("resID").innerText = data["id"] || "-";
                 document.getElementById("status").innerText = "Verification Successful";
@@ -285,7 +269,7 @@
                 header.innerText = "❌ COUNTERFEIT";
                 header.style.color = "#dc3545";
                 card.style.border = "4px solid #dc3545";
-                document.getElementById("resName").innerText = "UNKNOWN";
+                document.getElementById("resName").innerText = "FAKE";
                 document.getElementById("resRole").innerText = "INVALID";
                 document.getElementById("resID").innerText = "FAKE";
                 document.getElementById("resIssuer").innerText = "FAKE";
