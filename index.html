@@ -74,6 +74,15 @@
         .row { display: flex; justify-content: space-between; margin-bottom: 12px; border-bottom: 1px solid #f0f0f0; padding-bottom: 5px; }
         .row span { color: #888; font-size: 0.9rem; }
         .row strong { color: #333; font-size: 1rem; }
+        
+        /* Debug Info */
+        #debugInfo {
+            font-size: 0.7rem;
+            color: #999;
+            margin-top: 20px;
+            word-break: break-all;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -97,10 +106,12 @@
         <div class="row"><span>Role:</span> <strong id="resRole">-</strong></div>
         <div class="row"><span>ID No:</span> <strong id="resID">-</strong></div>
         <div class="row"><span>Issuer:</span> <strong id="resIssuer">-</strong></div>
+        
+        <div id="debugInfo"></div>
     </div>
 
     <script>
-        // --- 1. INTERNAL BASE45 DECODER ---
+        // --- 1. UTILITIES ---
         const B45_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
         const B45_MAP = {};
         for (let i = 0; i < B45_CHARSET.length; i++) B45_MAP[B45_CHARSET[i]] = i;
@@ -113,8 +124,7 @@
                 const char1 = B45_MAP[str[i + 1]];
                 const char2 = (i + 2 < str.length) ? B45_MAP[str[i + 2]] : null;
                 if (char2 === null) {
-                    const val = char0 + (char1 * 45);
-                    output.push(val);
+                    output.push(char0 + (char1 * 45));
                 } else {
                     const val = char0 + (char1 * 45) + (char2 * 45 * 45);
                     output.push(val >> 8);    
@@ -124,9 +134,23 @@
             return new Uint8Array(output);
         }
 
-        // --- 2. KEYS & UTILS ---
-        let publicKey = null;
+        function toBase64Url(uint8) {
+            return btoa(String.fromCharCode(...uint8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
 
+        function cleanBuffer(bufferView) {
+            return bufferView.buffer.slice(bufferView.byteOffset, bufferView.byteOffset + bufferView.byteLength);
+        }
+        
+        // Helper: Get value from object whether key is 1 or "1"
+        function getField(obj, key) {
+            if (obj[key] !== undefined) return obj[key];
+            if (obj[String(key)] !== undefined) return obj[String(key)];
+            return null;
+        }
+
+        // --- 2. LOAD KEYS ---
+        let publicKey = null;
         fetch('public_key.json').then(r => r.json()).then(jwk => {
             const x = base45Decode(jwk.x);
             const y = base45Decode(jwk.y);
@@ -136,20 +160,8 @@
                 { name: "ECDSA", namedCurve: "P-256" },
                 true, ["verify"]
             ).then(key => { publicKey = key; console.log("Key Loaded"); })
-             .catch(e => alert("Error: public_key.json missing or invalid."));
+             .catch(e => alert("Error: public_key.json missing."));
         });
-
-        function toBase64Url(uint8) {
-            return btoa(String.fromCharCode(...uint8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-        }
-
-        function cleanBuffer(bufferView) {
-            // Helper to extract the EXACT bytes from a larger memory buffer
-            return bufferView.buffer.slice(
-                bufferView.byteOffset, 
-                bufferView.byteOffset + bufferView.byteLength
-            );
-        }
 
         // --- 3. CAMERA ---
         const video = document.createElement("video");
@@ -181,32 +193,25 @@
             requestAnimationFrame(tick);
         }
 
-        // --- 4. VERIFICATION LOGIC (FIXED) ---
+        // --- 4. VERIFICATION ---
         async function processQR(qrString) {
             document.getElementById("status").innerText = "Verifying...";
             
             try {
                 if (qrString.startsWith("HC1:")) qrString = qrString.substring(4);
                 
-                // 1. Base45 -> Compressed Bytes
                 const compressed = base45Decode(qrString);
-                
-                // 2. Decompress -> COSE Bytes
                 const cwtBytes = pako.inflate(compressed);
-
-                // 3. Decode COSE Envelope
-                // CRITICAL FIX: Slice buffer to ensure clean CBOR decoding
+                
+                // Decode COSE Wrapper
                 let cose = CBOR.decode(cleanBuffer(cwtBytes));
-
                 if (cose && typeof cose === 'object' && !Array.isArray(cose) && cose.tag === 18) {
                     cose = cose.value;
                 }
                 
-                if (!Array.isArray(cose) || cose.length !== 4) throw new Error("Invalid COSE structure");
-
                 const [protHeaderBytes, unprotMap, payloadBytes, signature] = cose;
 
-                // 4. Verify Signature
+                // Verify
                 const Sig_structure = [ "Signature1", protHeaderBytes, new Uint8Array(0), payloadBytes ];
                 const ToBeSigned = CBOR.encode(Sig_structure);
 
@@ -217,11 +222,13 @@
                     publicKey, signature, ToBeSigned
                 );
 
-                // 5. Decode Payload (The ID Data)
-                // CRITICAL FIX: Must clean the payloadBytes buffer before decoding 
-                // otherwise it reads the parent COSE object again.
+                // Decode Payload
                 const data = CBOR.decode(cleanBuffer(payloadBytes));
                 
+                // Show raw data in debug section just in case
+                document.getElementById("debugInfo").innerText = "RAW DATA: " + JSON.stringify(data);
+                document.getElementById("debugInfo").style.display = "block";
+
                 if (valid) {
                     showResult(true, data);
                 } else {
@@ -250,20 +257,36 @@
                 header.style.color = "#28a745";
                 card.style.border = "2px solid #28a745";
                 
-                // Extract Data safely
+                // --- ROBUST DATA EXTRACTION ---
+                // 1. Get Name (Key 7 or "7")
                 let name = "Unknown";
-                
-                // Check if name is in Key 7 (int) or Key "7" (string)
-                const rawName = data[7] || data["7"];
+                const rawName = getField(data, 7);
                 if (rawName) {
-                    const nameBytes = base45Decode(rawName); 
-                    name = new TextDecoder().decode(nameBytes);
+                    // Try to decode Base45 name, if fails use raw
+                    try {
+                        if (typeof rawName === 'string') {
+                           // If python sent a raw string (not base45), just use it
+                           // If python sent base45, decode it
+                           // We check if it looks like Base45 (no spaces usually)
+                           if (!rawName.includes(" ")) {
+                               const nameBytes = base45Decode(rawName); 
+                               name = new TextDecoder().decode(nameBytes);
+                           } else {
+                               name = rawName;
+                           }
+                        }
+                    } catch(e) { name = rawName; } // Fallback
                 }
 
+                // 2. Get Other Fields
+                const issuer = getField(data, 1) || "Unknown";
+                const role = getField(data, "role") || "Unknown";
+                const id = getField(data, "id") || "Unknown";
+
                 document.getElementById("resName").innerText = name;
-                document.getElementById("resIssuer").innerText = data[1] || data["1"] || "Unknown";
-                document.getElementById("resRole").innerText = data["role"] || "-";
-                document.getElementById("resID").innerText = data["id"] || "-";
+                document.getElementById("resIssuer").innerText = issuer;
+                document.getElementById("resRole").innerText = role;
+                document.getElementById("resID").innerText = id;
                 document.getElementById("status").innerText = "Verification Successful";
             } else {
                 header.innerText = "❌ COUNTERFEIT";
@@ -272,7 +295,6 @@
                 document.getElementById("resName").innerText = "FAKE";
                 document.getElementById("resRole").innerText = "INVALID";
                 document.getElementById("resID").innerText = "FAKE";
-                document.getElementById("resIssuer").innerText = "FAKE";
                 document.getElementById("status").innerText = "⚠️ DO NOT ACCEPT";
             }
         }
