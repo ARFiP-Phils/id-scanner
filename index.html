@@ -29,7 +29,7 @@
         }
         
         .org-logo {
-            width: 80px;  /* Adjust size as needed */
+            width: 80px;
             height: auto;
             margin-bottom: 10px;
             display: inline-block;
@@ -38,7 +38,7 @@
         h1 {
             font-size: 1.25rem;
             margin: 5px 0;
-            color: #004085; /* Professional Dark Blue */
+            color: #004085;
             font-weight: 700;
             line-height: 1.4;
         }
@@ -100,9 +100,6 @@
             border-bottom: 2px solid #eee;
         }
 
-        .valid { color: #28a745; border: 2px solid #28a745; }
-        .invalid { color: #dc3545; border: 2px solid #dc3545; }
-
         .row { 
             display: flex; 
             justify-content: space-between; 
@@ -117,7 +114,7 @@
 <body>
 
     <div class="header-container">
-        <img src="ARFiP.png" alt="ARFP Logo" class="org-logo" onerror="this.style.display='none'"> 
+        <img src="logo.png" alt="ARFP Logo" class="org-logo" onerror="this.style.display='none'"> 
         <h1>Alliance of Registered Fisheries Professionals Inc.</h1>
         <h2>Official ID Verification</h2>
     </div>
@@ -140,7 +137,7 @@
     <script>
         let publicKey = null;
 
-        // 1. Load Public Key on Startup
+        // 1. Load Public Key
         fetch('public_key.json').then(r => r.json()).then(jwk => {
             const x = base45.decode(jwk.x);
             const y = base45.decode(jwk.y);
@@ -153,7 +150,7 @@
             ).then(key => { publicKey = key; console.log("Public Key Loaded"); })
              .catch(e => {
                  console.error(e);
-                 alert("System Error: Could not load public_key.json. Make sure it is in the same folder.");
+                 alert("System Error: Could not load public_key.json.");
              });
         });
 
@@ -161,14 +158,13 @@
             return btoa(String.fromCharCode(...uint8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         }
 
-        // 2. Camera & Scanning Logic
+        // 2. Camera Logic
         const video = document.createElement("video");
         const canvas = document.getElementById("canvas");
         const ctx = canvas.getContext("2d");
         const resultCard = document.getElementById("resultCard");
 
         function startScan() {
-            // Hide previous results when starting new scan
             resultCard.style.display = "none";
             document.getElementById("status").innerText = "Searching for QR code...";
             
@@ -193,23 +189,47 @@
 
                 if (code) {
                     processQR(code.data);
-                    return; // Stop scanning after find
+                    return;
                 }
             }
             requestAnimationFrame(tick);
         }
 
-        // 3. Verification Logic
+        // 3. Verification Logic (UPDATED FIX)
         async function processQR(qrString) {
             document.getElementById("status").innerText = "Verifying Signature...";
             
             try {
                 if (qrString.startsWith("HC1:")) qrString = qrString.substring(4);
-                const compressed = base45.decode(qrString);
-                const cwtBytes = pako.inflate(compressed);
-                const cose = CBOR.decode(cwtBytes.buffer);
                 
-                if (!Array.isArray(cose) || cose.length !== 4) throw new Error("Invalid COSE format");
+                // Decode Base45
+                const compressed = base45.decode(qrString);
+                
+                // Decompress Zlib
+                const cwtBytes = pako.inflate(compressed);
+
+                // --- FIX STARTS HERE ---
+                // Clean the buffer to remove empty space issues from Pako
+                const cleanBuffer = cwtBytes.buffer.slice(
+                    cwtBytes.byteOffset, 
+                    cwtBytes.byteOffset + cwtBytes.byteLength
+                );
+
+                // Decode CBOR
+                let cose = CBOR.decode(cleanBuffer);
+
+                // Unwrap "Tag 18" (COSE Sign1) if the Python library added it
+                // This checks if the result is an object with a 'tag' property instead of an array
+                if (cose && typeof cose === 'object' && !Array.isArray(cose) && cose.tag === 18) {
+                    console.log("Unwrapping Tag 18...");
+                    cose = cose.value;
+                }
+                // --- FIX ENDS HERE ---
+                
+                if (!Array.isArray(cose) || cose.length !== 4) {
+                    console.log("Debug COSE:", cose);
+                    throw new Error("Invalid COSE format: Not an array of 4");
+                }
 
                 const [protHeaderBytes, unprotMap, payloadBytes, signature] = cose;
 
@@ -234,7 +254,6 @@
                     ToBeSigned
                 );
 
-                // Decode Payload regardless of validity to show who it *claims* to be
                 const data = CBOR.decode(payloadBytes.buffer);
                 
                 if (valid) {
@@ -245,8 +264,9 @@
 
             } catch (err) {
                 console.error(err);
-                document.getElementById("status").innerText = "INVALID FORMAT";
+                document.getElementById("status").innerText = "INVALID / ERROR";
                 resultCard.style.display = "none";
+                alert("Scan failed: " + err.message);
             }
         }
 
@@ -254,7 +274,6 @@
             const card = document.getElementById("resultCard");
             const header = document.getElementById("verifyHeader");
             
-            // Stop the camera feed visualization
             canvas.style.display = "none";
             video.pause();
             if(video.srcObject) {
@@ -265,11 +284,15 @@
             
             if (isValid) {
                 header.innerText = "✅ AUTHENTICATED";
-                header.style.color = "#28a745"; // Green
+                header.style.color = "#28a745";
                 card.style.border = "2px solid #28a745";
                 
-                const nameBytes = base45.decode(data[7]); 
-                const name = new TextDecoder().decode(nameBytes);
+                // Decode Name (stored as Base45 in key 7)
+                let name = "Unknown";
+                if (data[7]) {
+                    const nameBytes = base45.decode(data[7]); 
+                    name = new TextDecoder().decode(nameBytes);
+                }
 
                 document.getElementById("resName").innerText = name;
                 document.getElementById("resIssuer").innerText = data[1] || "Unknown";
@@ -278,9 +301,9 @@
                 document.getElementById("status").innerText = "Verification Successful";
             } else {
                 header.innerText = "❌ COUNTERFEIT / INVALID";
-                header.style.color = "#dc3545"; // Red
+                header.style.color = "#dc3545";
                 card.style.border = "4px solid #dc3545";
-                document.getElementById("resName").innerText = "UNKOWN";
+                document.getElementById("resName").innerText = "UNKNOWN";
                 document.getElementById("resRole").innerText = "INVALID SIGNATURE";
                 document.getElementById("resID").innerText = "FAKE";
                 document.getElementById("resIssuer").innerText = "FAKE";
