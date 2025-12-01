@@ -27,7 +27,7 @@
 <body>
 
     <div class="header-container">
-        <img src="ARFiP.png" alt="ARFP Logo" class="org-logo" onerror="this.style.display='none'"> 
+        <img src="ARFiP.png" alt="ARFiP Logo" class="org-logo" onerror="this.style.display='none'"> 
         <h1>Alliance of Registered Fisheries Professionals Inc.</h1>
         <h2>Official ID Verification</h2>
     </div>
@@ -56,23 +56,26 @@
             const output = [];
             for (let i = 0; i < str.length; i += 3) {
                 if (i + 1 >= str.length) break; 
-                const c0 = B45_MAP[str[i]], c1 = B45_MAP[str[i + 1]], c2 = (i + 2 < str.length) ? B45_MAP[str[i + 2]] : null;
-                // If character is invalid (not in B45 map), return raw string fallback
-                if (c0 === undefined || c1 === undefined) throw new Error("Invalid Base45");
+                const c0 = B45_MAP[str[i]];
+                const c1 = B45_MAP[str[i + 1]];
+                const c2 = (i + 2 < str.length) ? B45_MAP[str[i + 2]] : null;
+                
+                // If we encounter a character NOT in our map, throw error to trigger fallback
+                if (c0 === undefined || c1 === undefined) throw new Error("Invalid Base45 Char");
                 
                 if (c2 === null) output.push(c0 + (c1 * 45));
-                else { const v = c0 + (c1 * 45) + (c2 * 45 * 45); output.push(v >> 8); output.push(v & 0xFF); }
+                else { 
+                    if (c2 === undefined) throw new Error("Invalid Base45 Char");
+                    const v = c0 + (c1 * 45) + (c2 * 45 * 45); 
+                    output.push(v >> 8); 
+                    output.push(v & 0xFF); 
+                }
             }
             return new Uint8Array(output);
         }
 
         function toBase64Url(uint8) {
             return btoa(String.fromCharCode(...uint8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-        }
-
-        function decodeCBOR(view) {
-            const cleanArray = new Uint8Array(view); 
-            return CBOR.decode(cleanArray.buffer);   
         }
 
         function getBytes(view) {
@@ -83,6 +86,12 @@
             if (obj[key] !== undefined) return obj[key];
             if (obj[String(key)] !== undefined) return obj[String(key)];
             return null;
+        }
+
+        function decodeCBOR(view) {
+            // Helper to clean buffer for CBOR lib
+            const cleanArray = new Uint8Array(view); 
+            return CBOR.decode(cleanArray.buffer);   
         }
 
         // --- 2. MANUAL SIGNATURE BUILDER ---
@@ -165,7 +174,6 @@
                 const compressed = base45Decode(qrString);
                 const cwtBytes = pako.inflate(compressed);
                 
-                // Decode COSE
                 let cose = decodeCBOR(cwtBytes);
                 if (cose && typeof cose === 'object' && !Array.isArray(cose) && cose.tag === 18) cose = cose.value;
                 
@@ -183,15 +191,11 @@
                 );
 
                 const data = decodeCBOR(payloadBytes);
-                
-                // Debug View
                 document.getElementById("debugInfo").innerText = "RAW: " + JSON.stringify(data);
 
-                if (valid) {
-                    showResult(true, data);
-                } else {
-                    showResult(false, data);
-                }
+                // Even if signature is invalid, show data to debug
+                // (In production you might want to hide data if invalid)
+                showResult(valid, data);
 
             } catch (err) {
                 console.error(err);
@@ -210,13 +214,14 @@
             const header = document.getElementById("verifyHeader");
             card.style.display = "block";
             
-            // --- FIX FOR NAMES ---
+            // --- DATA DISPLAY ---
             let name = "Unknown";
             const rawName = getField(data, 7);
             
             if (rawName) {
                 try {
-                    // Always try to decode if it's a string
+                    // Try to decode. If it fails (or is just a normal string), use raw.
+                    // IMPORTANT: We do NOT check for spaces anymore.
                     if (typeof rawName === 'string') {
                         const nameBytes = base45Decode(rawName); 
                         name = new TextDecoder().decode(nameBytes);
@@ -224,7 +229,7 @@
                         name = rawName;
                     }
                 } catch(e) { 
-                    // If decoding fails, it wasn't encoded, so show raw
+                    // Fallback to raw string if decoding crashed
                     name = rawName; 
                 }
             }
