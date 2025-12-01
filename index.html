@@ -27,7 +27,7 @@
 <body>
 
     <div class="header-container">
-        <img src="logo.png" alt="ARFP Logo" class="org-logo" onerror="this.style.display='none'"> 
+        <img src="ARFiP.png" alt="ARFP Logo" class="org-logo" onerror="this.style.display='none'"> 
         <h1>Alliance of Registered Fisheries Professionals Inc.</h1>
         <h2>Official ID Verification</h2>
     </div>
@@ -57,6 +57,9 @@
             for (let i = 0; i < str.length; i += 3) {
                 if (i + 1 >= str.length) break; 
                 const c0 = B45_MAP[str[i]], c1 = B45_MAP[str[i + 1]], c2 = (i + 2 < str.length) ? B45_MAP[str[i + 2]] : null;
+                // If character is invalid (not in B45 map), return raw string fallback
+                if (c0 === undefined || c1 === undefined) throw new Error("Invalid Base45");
+                
                 if (c2 === null) output.push(c0 + (c1 * 45));
                 else { const v = c0 + (c1 * 45) + (c2 * 45 * 45); output.push(v >> 8); output.push(v & 0xFF); }
             }
@@ -67,13 +70,11 @@
             return btoa(String.fromCharCode(...uint8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         }
 
-        // Safe conversion to ArrayBuffer for CBOR.decode
         function decodeCBOR(view) {
-            const cleanArray = new Uint8Array(view); // Copy to new typed array
-            return CBOR.decode(cleanArray.buffer);   // Pass underlying ArrayBuffer
+            const cleanArray = new Uint8Array(view); 
+            return CBOR.decode(cleanArray.buffer);   
         }
 
-        // Helper to extract clean bytes from a potential view
         function getBytes(view) {
             return new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
         }
@@ -102,7 +103,6 @@
             const hBstr = encodeBytes(protHeader);
             const aBstr = new Uint8Array([0x40]); 
             const pBstr = encodeBytes(payload);
-            
             const totalLen = 1 + sig1.length + hBstr.length + aBstr.length + pBstr.length;
             const res = new Uint8Array(totalLen);
             let offset = 0;
@@ -162,22 +162,17 @@
             try {
                 if (qrString.startsWith("HC1:")) qrString = qrString.substring(4);
                 
-                // 1. Inflate
                 const compressed = base45Decode(qrString);
                 const cwtBytes = pako.inflate(compressed);
                 
-                // 2. Decode COSE (Fix: Use decodeCBOR helper)
+                // Decode COSE
                 let cose = decodeCBOR(cwtBytes);
                 if (cose && typeof cose === 'object' && !Array.isArray(cose) && cose.tag === 18) cose = cose.value;
                 
-                // 3. Extract Headers & Payload
-                // Note: cose[0] is protHeader, cose[2] is payload. Both are byte arrays.
-                // We use getBytes to ensure we have a clean Uint8Array for the Signature Builder
                 const protHeaderBytes = getBytes(cose[0]);
                 const payloadBytes = getBytes(cose[2]);
                 const signature = cose[3];
 
-                // 4. Manually Reconstruct "To Be Signed" Bytes
                 const ToBeSigned = createToBeSigned(protHeaderBytes, payloadBytes);
 
                 if (!publicKey) { alert("Public Key not loaded."); return; }
@@ -187,7 +182,6 @@
                     publicKey, signature, ToBeSigned
                 );
 
-                // 5. Decode Payload (Fix: Use decodeCBOR helper)
                 const data = decodeCBOR(payloadBytes);
                 
                 // Debug View
@@ -216,15 +210,23 @@
             const header = document.getElementById("verifyHeader");
             card.style.display = "block";
             
+            // --- FIX FOR NAMES ---
             let name = "Unknown";
             const rawName = getField(data, 7);
+            
             if (rawName) {
                 try {
-                   if (typeof rawName === 'string' && !rawName.includes(" ")) {
-                       const nameBytes = base45Decode(rawName); 
-                       name = new TextDecoder().decode(nameBytes);
-                   } else name = rawName;
-                } catch(e) { name = rawName; }
+                    // Always try to decode if it's a string
+                    if (typeof rawName === 'string') {
+                        const nameBytes = base45Decode(rawName); 
+                        name = new TextDecoder().decode(nameBytes);
+                    } else {
+                        name = rawName;
+                    }
+                } catch(e) { 
+                    // If decoding fails, it wasn't encoded, so show raw
+                    name = rawName; 
+                }
             }
 
             const issuer = getField(data, 1) || "Unknown";
