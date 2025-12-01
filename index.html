@@ -9,80 +9,19 @@
     <script src="https://cdn.jsdelivr.net/npm/cbor-js@0.1.0/cbor.min.js"></script>
     
     <style>
-        body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            text-align: center; 
-            background: #f4f6f8; 
-            padding: 20px; 
-            margin: 0;
-            color: #333;
-        }
-
-        .header-container {
-            margin-bottom: 25px;
-            background: white;
-            padding: 20px;
-            border-radius: 12px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        }
-        
-        .org-logo {
-            width: 80px;
-            height: auto;
-            margin-bottom: 10px;
-            display: inline-block;
-        }
-
-        h1 { font-size: 1.25rem; margin: 5px 0; color: #004085; font-weight: 700; }
+        body { font-family: 'Segoe UI', sans-serif; text-align: center; background: #f4f6f8; padding: 20px; color: #333; }
+        .header-container { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); margin-bottom: 25px; }
+        .org-logo { width: 80px; height: auto; margin-bottom: 10px; }
+        h1 { font-size: 1.25rem; color: #004085; font-weight: 700; margin: 5px 0; }
         h2 { font-size: 0.9rem; color: #666; margin-top: 5px; text-transform: uppercase; }
-
-        #canvas { 
-            width: 100%; 
-            max-width: 400px; 
-            display: none; 
-            border-radius: 8px; 
-            margin: 0 auto;
-            border: 4px solid #333;
-        }
-        
+        #canvas { width: 100%; max-width: 400px; display: none; border-radius: 8px; margin: 0 auto; border: 4px solid #333; }
         #status { margin-top: 15px; font-weight: bold; font-size: 1rem; min-height: 1.5em; }
-
-        .btn-scan { 
-            padding: 12px 30px; 
-            font-size: 1rem; 
-            background: #0056b3; 
-            color: white; 
-            border: none; 
-            border-radius: 25px; 
-            cursor: pointer; 
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-        .btn-scan:active { background: #004494; }
-
-        .card { 
-            background: white; 
-            max-width: 400px; 
-            margin: 20px auto; 
-            padding: 20px; 
-            border-radius: 12px; 
-            box-shadow: 0 10px 15px rgba(0,0,0,0.1); 
-            display: none; 
-            text-align: left;
-        }
-        
+        .btn-scan { padding: 12px 30px; font-size: 1rem; background: #0056b3; color: white; border: none; border-radius: 25px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .card { background: white; max-width: 400px; margin: 20px auto; padding: 20px; border-radius: 12px; box-shadow: 0 10px 15px rgba(0,0,0,0.1); display: none; text-align: left; }
         .card h3 { text-align: center; margin-top: 0; padding-bottom: 10px; border-bottom: 2px solid #eee; }
         .row { display: flex; justify-content: space-between; margin-bottom: 12px; border-bottom: 1px solid #f0f0f0; padding-bottom: 5px; }
-        .row span { color: #888; font-size: 0.9rem; }
-        .row strong { color: #333; font-size: 1rem; }
-        
-        /* Debug Info */
-        #debugInfo {
-            font-size: 0.7rem;
-            color: #999;
-            margin-top: 20px;
-            word-break: break-all;
-            display: none;
-        }
+        .row strong { color: #333; } .row span { color: #888; font-size: 0.9rem; }
+        #debugInfo { font-size: 0.7rem; color: #999; margin-top: 20px; word-break: break-all; display: none; }
     </style>
 </head>
 <body>
@@ -95,9 +34,7 @@
     
     <button class="btn-scan" onclick="startScan()">📷 Scan ID Card</button>
     <br><br>
-    
     <canvas id="canvas"></canvas>
-    
     <div id="status">Ready to scan...</div>
 
     <div id="resultCard" class="card">
@@ -106,7 +43,6 @@
         <div class="row"><span>Role:</span> <strong id="resRole">-</strong></div>
         <div class="row"><span>ID No:</span> <strong id="resID">-</strong></div>
         <div class="row"><span>Issuer:</span> <strong id="resIssuer">-</strong></div>
-        
         <div id="debugInfo"></div>
     </div>
 
@@ -120,16 +56,9 @@
             const output = [];
             for (let i = 0; i < str.length; i += 3) {
                 if (i + 1 >= str.length) break; 
-                const char0 = B45_MAP[str[i]];
-                const char1 = B45_MAP[str[i + 1]];
-                const char2 = (i + 2 < str.length) ? B45_MAP[str[i + 2]] : null;
-                if (char2 === null) {
-                    output.push(char0 + (char1 * 45));
-                } else {
-                    const val = char0 + (char1 * 45) + (char2 * 45 * 45);
-                    output.push(val >> 8);    
-                    output.push(val & 0xFF);  
-                }
+                const c0 = B45_MAP[str[i]], c1 = B45_MAP[str[i + 1]], c2 = (i + 2 < str.length) ? B45_MAP[str[i + 2]] : null;
+                if (c2 === null) output.push(c0 + (c1 * 45));
+                else { const v = c0 + (c1 * 45) + (c2 * 45 * 45); output.push(v >> 8); output.push(v & 0xFF); }
             }
             return new Uint8Array(output);
         }
@@ -139,31 +68,68 @@
         }
 
         function cleanBuffer(bufferView) {
-            return bufferView.buffer.slice(bufferView.byteOffset, bufferView.byteOffset + bufferView.byteLength);
+            return new Uint8Array(bufferView.buffer.slice(bufferView.byteOffset, bufferView.byteOffset + bufferView.byteLength));
         }
-        
-        // Helper: Get value from object whether key is 1 or "1"
+
         function getField(obj, key) {
             if (obj[key] !== undefined) return obj[key];
             if (obj[String(key)] !== undefined) return obj[String(key)];
             return null;
         }
 
-        // --- 2. LOAD KEYS ---
+        // --- 2. MANUAL SIGNATURE BUILDER (The Fix) ---
+        function encodeBytes(data) {
+            // Encodes data as CBOR Byte String (Major Type 2)
+            let prefix = [];
+            let len = data.length;
+            if (len < 24) prefix.push(0x40 | len);
+            else if (len < 256) prefix.push(0x58, len);
+            else if (len < 65536) prefix.push(0x59, (len >> 8) & 0xFF, len & 0xFF);
+            else prefix.push(0x5A, (len >>> 24), (len >>> 16) & 0xFF, (len >>> 8) & 0xFF, len & 0xFF);
+            
+            const res = new Uint8Array(prefix.length + data.length);
+            res.set(prefix);
+            res.set(data, prefix.length);
+            return res;
+        }
+
+        function createToBeSigned(protHeader, payload) {
+            // Manually build Sig_Structure to match Python exactly
+            // Sig_structure = ["Signature1", protHeader, external_aad(empty), payload]
+            
+            // "Signature1" encoded
+            const sig1 = new Uint8Array([0x6A, 0x53, 0x69, 0x67, 0x6E, 0x61, 0x74, 0x75, 0x72, 0x65, 0x31]);
+            // Encoded Bytes
+            const hBstr = encodeBytes(protHeader);
+            const aBstr = new Uint8Array([0x40]); // Empty AAD
+            const pBstr = encodeBytes(payload);
+            
+            // Wrap in Array(4) -> 0x84
+            const totalLen = 1 + sig1.length + hBstr.length + aBstr.length + pBstr.length;
+            const res = new Uint8Array(totalLen);
+            let offset = 0;
+            res[offset++] = 0x84;
+            
+            res.set(sig1, offset); offset += sig1.length;
+            res.set(hBstr, offset); offset += hBstr.length;
+            res.set(aBstr, offset); offset += aBstr.length;
+            res.set(pBstr, offset);
+            return res;
+        }
+
+        // --- 3. LOAD KEYS ---
         let publicKey = null;
         fetch('public_key.json').then(r => r.json()).then(jwk => {
             const x = base45Decode(jwk.x);
             const y = base45Decode(jwk.y);
             window.crypto.subtle.importKey(
-                "jwk", 
-                { kty: "EC", crv: "P-256", x: toBase64Url(x), y: toBase64Url(y), ext: true },
-                { name: "ECDSA", namedCurve: "P-256" },
-                true, ["verify"]
+                "jwk", { kty: "EC", crv: "P-256", x: toBase64Url(x), y: toBase64Url(y), ext: true },
+                { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]
             ).then(key => { publicKey = key; console.log("Key Loaded"); })
              .catch(e => alert("Error: public_key.json missing."));
         });
 
-        // --- 3. CAMERA ---
+        // --- 4. CAMERA ---
         const video = document.createElement("video");
         const canvas = document.getElementById("canvas");
         const ctx = canvas.getContext("2d");
@@ -193,10 +159,9 @@
             requestAnimationFrame(tick);
         }
 
-        // --- 4. VERIFICATION ---
+        // --- 5. VERIFICATION LOGIC ---
         async function processQR(qrString) {
             document.getElementById("status").innerText = "Verifying...";
-            
             try {
                 if (qrString.startsWith("HC1:")) qrString = qrString.substring(4);
                 
@@ -204,16 +169,17 @@
                 const cwtBytes = pako.inflate(compressed);
                 
                 // Decode COSE Wrapper
-                let cose = CBOR.decode(cleanBuffer(cwtBytes));
-                if (cose && typeof cose === 'object' && !Array.isArray(cose) && cose.tag === 18) {
-                    cose = cose.value;
-                }
+                let cose = CBOR.decode(cleanBuffer({buffer: cwtBytes.buffer, byteOffset: 0, byteLength: cwtBytes.length}));
+                if (cose && typeof cose === 'object' && !Array.isArray(cose) && cose.tag === 18) cose = cose.value;
                 
-                const [protHeaderBytes, unprotMap, payloadBytes, signature] = cose;
+                // Extract Parts
+                const protHeaderBytes = cleanBuffer({buffer: cose[0].buffer || cose[0], byteOffset: 0, byteLength: cose[0].length});
+                const signature = cose[3];
+                // Payload is in cose[2]. Clean it to ensure it's a pure Uint8Array
+                const payloadBytes = cleanBuffer({buffer: cose[2].buffer || cose[2], byteOffset: 0, byteLength: cose[2].length});
 
-                // Verify
-                const Sig_structure = [ "Signature1", protHeaderBytes, new Uint8Array(0), payloadBytes ];
-                const ToBeSigned = CBOR.encode(Sig_structure);
+                // MANUALLY Construct "To Be Signed" (The Fix)
+                const ToBeSigned = createToBeSigned(protHeaderBytes, payloadBytes);
 
                 if (!publicKey) { alert("Public Key not loaded."); return; }
 
@@ -222,17 +188,16 @@
                     publicKey, signature, ToBeSigned
                 );
 
-                // Decode Payload
-                const data = CBOR.decode(cleanBuffer(payloadBytes));
+                // Decode Payload for Display
+                const data = CBOR.decode(payloadBytes.buffer);
                 
-                // Show raw data in debug section just in case
-                document.getElementById("debugInfo").innerText = "RAW DATA: " + JSON.stringify(data);
-                document.getElementById("debugInfo").style.display = "block";
+                document.getElementById("debugInfo").innerText = "RAW: " + JSON.stringify(data);
 
                 if (valid) {
                     showResult(true, data);
                 } else {
-                    showResult(false, null);
+                    // Even if signature fails, try to show data but mark as fake
+                    showResult(false, data);
                 }
 
             } catch (err) {
@@ -252,50 +217,37 @@
             const header = document.getElementById("verifyHeader");
             card.style.display = "block";
             
+            // Extract Data
+            let name = "Unknown";
+            const rawName = getField(data, 7);
+            if (rawName) {
+                try {
+                   if (typeof rawName === 'string' && !rawName.includes(" ")) {
+                       const nameBytes = base45Decode(rawName); 
+                       name = new TextDecoder().decode(nameBytes);
+                   } else name = rawName;
+                } catch(e) { name = rawName; }
+            }
+
+            const issuer = getField(data, 1) || "Unknown";
+            const role = getField(data, "role") || "Unknown";
+            const id = getField(data, "id") || "Unknown";
+
+            document.getElementById("resName").innerText = name;
+            document.getElementById("resIssuer").innerText = issuer;
+            document.getElementById("resRole").innerText = role;
+            document.getElementById("resID").innerText = id;
+
             if (isValid) {
                 header.innerText = "✅ AUTHENTICATED";
                 header.style.color = "#28a745";
                 card.style.border = "2px solid #28a745";
-                
-                // --- ROBUST DATA EXTRACTION ---
-                // 1. Get Name (Key 7 or "7")
-                let name = "Unknown";
-                const rawName = getField(data, 7);
-                if (rawName) {
-                    // Try to decode Base45 name, if fails use raw
-                    try {
-                        if (typeof rawName === 'string') {
-                           // If python sent a raw string (not base45), just use it
-                           // If python sent base45, decode it
-                           // We check if it looks like Base45 (no spaces usually)
-                           if (!rawName.includes(" ")) {
-                               const nameBytes = base45Decode(rawName); 
-                               name = new TextDecoder().decode(nameBytes);
-                           } else {
-                               name = rawName;
-                           }
-                        }
-                    } catch(e) { name = rawName; } // Fallback
-                }
-
-                // 2. Get Other Fields
-                const issuer = getField(data, 1) || "Unknown";
-                const role = getField(data, "role") || "Unknown";
-                const id = getField(data, "id") || "Unknown";
-
-                document.getElementById("resName").innerText = name;
-                document.getElementById("resIssuer").innerText = issuer;
-                document.getElementById("resRole").innerText = role;
-                document.getElementById("resID").innerText = id;
                 document.getElementById("status").innerText = "Verification Successful";
             } else {
-                header.innerText = "❌ COUNTERFEIT";
+                header.innerText = "❌ COUNTERFEIT / INVALID SIG";
                 header.style.color = "#dc3545";
                 card.style.border = "4px solid #dc3545";
-                document.getElementById("resName").innerText = "FAKE";
-                document.getElementById("resRole").innerText = "INVALID";
-                document.getElementById("resID").innerText = "FAKE";
-                document.getElementById("status").innerText = "⚠️ DO NOT ACCEPT";
+                document.getElementById("status").innerText = "⚠️ SIGNATURE MISMATCH";
             }
         }
     </script>
