@@ -7,7 +7,6 @@
     <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/cbor-js@0.1.0/cbor.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/base45-js@1.0.2/lib/base45-js.min.js"></script>
     
     <style>
         body { 
@@ -19,7 +18,6 @@
             color: #333;
         }
 
-        /* --- Header Styles --- */
         .header-container {
             margin-bottom: 25px;
             background: white;
@@ -35,23 +33,9 @@
             display: inline-block;
         }
 
-        h1 {
-            font-size: 1.25rem;
-            margin: 5px 0;
-            color: #004085;
-            font-weight: 700;
-            line-height: 1.4;
-        }
+        h1 { font-size: 1.25rem; margin: 5px 0; color: #004085; font-weight: 700; }
+        h2 { font-size: 0.9rem; color: #666; margin-top: 5px; text-transform: uppercase; }
 
-        h2 {
-            font-size: 0.9rem;
-            color: #666;
-            margin-top: 5px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        /* --- Scanner Elements --- */
         #canvas { 
             width: 100%; 
             max-width: 400px; 
@@ -61,12 +45,7 @@
             border: 4px solid #333;
         }
         
-        #status { 
-            margin-top: 15px; 
-            font-weight: bold; 
-            font-size: 1rem; 
-            min-height: 1.5em;
-        }
+        #status { margin-top: 15px; font-weight: bold; font-size: 1rem; min-height: 1.5em; }
 
         .btn-scan { 
             padding: 12px 30px; 
@@ -77,11 +56,9 @@
             border-radius: 25px; 
             cursor: pointer; 
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            transition: background 0.2s;
         }
         .btn-scan:active { background: #004494; }
 
-        /* --- Result Card --- */
         .card { 
             background: white; 
             max-width: 400px; 
@@ -93,20 +70,8 @@
             text-align: left;
         }
         
-        .card h3 {
-            text-align: center;
-            margin-top: 0;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #eee;
-        }
-
-        .row { 
-            display: flex; 
-            justify-content: space-between; 
-            margin-bottom: 12px; 
-            border-bottom: 1px solid #f0f0f0; 
-            padding-bottom: 5px; 
-        }
+        .card h3 { text-align: center; margin-top: 0; padding-bottom: 10px; border-bottom: 2px solid #eee; }
+        .row { display: flex; justify-content: space-between; margin-bottom: 12px; border-bottom: 1px solid #f0f0f0; padding-bottom: 5px; }
         .row span { color: #888; font-size: 0.9rem; }
         .row strong { color: #333; font-size: 1rem; }
     </style>
@@ -135,12 +100,39 @@
     </div>
 
     <script>
+        // --- 1. INTERNAL BASE45 DECODER (Fixes the "cant find variable" error) ---
+        const B45_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+        const B45_MAP = {};
+        for (let i = 0; i < B45_CHARSET.length; i++) B45_MAP[B45_CHARSET[i]] = i;
+
+        function base45Decode(str) {
+            const output = [];
+            for (let i = 0; i < str.length; i += 3) {
+                if (i + 1 >= str.length) break; // Safety check
+                const char0 = B45_MAP[str[i]];
+                const char1 = B45_MAP[str[i + 1]];
+                const char2 = (i + 2 < str.length) ? B45_MAP[str[i + 2]] : null;
+
+                if (char2 === null) {
+                    // 2 characters -> 1 byte
+                    const val = char0 + (char1 * 45);
+                    output.push(val);
+                } else {
+                    // 3 characters -> 2 bytes
+                    const val = char0 + (char1 * 45) + (char2 * 45 * 45);
+                    output.push(val >> 8);    // High byte
+                    output.push(val & 0xFF);  // Low byte
+                }
+            }
+            return new Uint8Array(output);
+        }
+
+        // --- 2. CONFIGURATION & KEYS ---
         let publicKey = null;
 
-        // 1. Load Public Key
         fetch('public_key.json').then(r => r.json()).then(jwk => {
-            const x = base45.decode(jwk.x);
-            const y = base45.decode(jwk.y);
+            const x = base45Decode(jwk.x);
+            const y = base45Decode(jwk.y);
             
             window.crypto.subtle.importKey(
                 "jwk", 
@@ -150,7 +142,7 @@
             ).then(key => { publicKey = key; console.log("Public Key Loaded"); })
              .catch(e => {
                  console.error(e);
-                 alert("System Error: Could not load public_key.json.");
+                 alert("Error loading public_key.json. Ensure it is in the same folder.");
              });
         });
 
@@ -158,7 +150,7 @@
             return btoa(String.fromCharCode(...uint8)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         }
 
-        // 2. Camera Logic
+        // --- 3. CAMERA & SCANNING ---
         const video = document.createElement("video");
         const canvas = document.getElementById("canvas");
         const ctx = canvas.getContext("2d");
@@ -195,41 +187,34 @@
             requestAnimationFrame(tick);
         }
 
-        // 3. Verification Logic (UPDATED FIX)
+        // --- 4. VERIFICATION LOGIC ---
         async function processQR(qrString) {
             document.getElementById("status").innerText = "Verifying Signature...";
             
             try {
                 if (qrString.startsWith("HC1:")) qrString = qrString.substring(4);
                 
-                // Decode Base45
-                const compressed = base45.decode(qrString);
+                // Step A: Base45 Decode (Using our internal function)
+                const compressed = base45Decode(qrString);
                 
-                // Decompress Zlib
+                // Step B: Zlib Decompress
                 const cwtBytes = pako.inflate(compressed);
 
-                // --- FIX STARTS HERE ---
-                // Clean the buffer to remove empty space issues from Pako
+                // Step C: Fix Pako/CBOR Buffer Issue
                 const cleanBuffer = cwtBytes.buffer.slice(
                     cwtBytes.byteOffset, 
                     cwtBytes.byteOffset + cwtBytes.byteLength
                 );
 
-                // Decode CBOR
+                // Step D: CBOR Decode
                 let cose = CBOR.decode(cleanBuffer);
 
-                // Unwrap "Tag 18" (COSE Sign1) if the Python library added it
-                // This checks if the result is an object with a 'tag' property instead of an array
+                // Unwrap Tag 18 if present
                 if (cose && typeof cose === 'object' && !Array.isArray(cose) && cose.tag === 18) {
-                    console.log("Unwrapping Tag 18...");
                     cose = cose.value;
                 }
-                // --- FIX ENDS HERE ---
                 
-                if (!Array.isArray(cose) || cose.length !== 4) {
-                    console.log("Debug COSE:", cose);
-                    throw new Error("Invalid COSE format: Not an array of 4");
-                }
+                if (!Array.isArray(cose) || cose.length !== 4) throw new Error("Invalid COSE structure");
 
                 const [protHeaderBytes, unprotMap, payloadBytes, signature] = cose;
 
@@ -264,22 +249,19 @@
 
             } catch (err) {
                 console.error(err);
-                document.getElementById("status").innerText = "INVALID / ERROR";
+                document.getElementById("status").innerText = "SCAN FAILED";
+                alert("Error processing QR: " + err.message);
                 resultCard.style.display = "none";
-                alert("Scan failed: " + err.message);
             }
         }
 
         function showResult(isValid, data) {
-            const card = document.getElementById("resultCard");
-            const header = document.getElementById("verifyHeader");
-            
             canvas.style.display = "none";
             video.pause();
-            if(video.srcObject) {
-                video.srcObject.getTracks().forEach(track => track.stop());
-            }
+            if(video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
 
+            const card = document.getElementById("resultCard");
+            const header = document.getElementById("verifyHeader");
             card.style.display = "block";
             
             if (isValid) {
@@ -287,10 +269,10 @@
                 header.style.color = "#28a745";
                 card.style.border = "2px solid #28a745";
                 
-                // Decode Name (stored as Base45 in key 7)
+                // Decode Name (Internal Base45)
                 let name = "Unknown";
                 if (data[7]) {
-                    const nameBytes = base45.decode(data[7]); 
+                    const nameBytes = base45Decode(data[7]); 
                     name = new TextDecoder().decode(nameBytes);
                 }
 
@@ -300,14 +282,14 @@
                 document.getElementById("resID").innerText = data["id"] || "-";
                 document.getElementById("status").innerText = "Verification Successful";
             } else {
-                header.innerText = "❌ COUNTERFEIT / INVALID";
+                header.innerText = "❌ COUNTERFEIT";
                 header.style.color = "#dc3545";
                 card.style.border = "4px solid #dc3545";
                 document.getElementById("resName").innerText = "UNKNOWN";
-                document.getElementById("resRole").innerText = "INVALID SIGNATURE";
+                document.getElementById("resRole").innerText = "INVALID";
                 document.getElementById("resID").innerText = "FAKE";
                 document.getElementById("resIssuer").innerText = "FAKE";
-                document.getElementById("status").innerText = "⚠️ DO NOT ACCEPT THIS ID";
+                document.getElementById("status").innerText = "⚠️ DO NOT ACCEPT";
             }
         }
     </script>
