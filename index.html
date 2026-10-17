@@ -4,9 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ARFP Verification</title>
-    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/cbor-js@0.1.0/cbor.min.js"></script>
+    <!-- Libraries are served from this repo (lib/), not a CDN, so a compromised
+         third-party server cannot change what the verifier runs.
+         Sources: jsqr@1.4.0 dist/jsQR.js, pako@2.1.0 dist/pako_inflate.min.js,
+         cbor-js@0.1.0 cbor.js (copied unmodified from the npm packages). -->
+    <script src="lib/jsQR.js"></script>
+    <script src="lib/pako_inflate.min.js"></script>
+    <script src="lib/cbor.js"></script>
     
     <style>
         body { font-family: 'Segoe UI', sans-serif; text-align: center; background: #f4f6f8; padding: 20px; color: #333; }
@@ -43,6 +47,7 @@
         <div class="row"><span>Role:</span> <strong id="resRole">-</strong></div>
         <div class="row"><span>ID No:</span> <strong id="resID">-</strong></div>
         <div class="row"><span>Issuer:</span> <strong id="resIssuer">-</strong></div>
+        <div class="row"><span>Valid Until:</span> <strong id="resValid">-</strong></div>
         <div id="debugInfo"></div>
     </div>
 
@@ -124,16 +129,63 @@
         }
 
         // --- 3. LOAD KEYS ---
-        let publicKey = null;
-        fetch('public_key.json').then(r => r.json()).then(jwk => {
+        // public_key.json  = the current signing key (one JWK object).
+        // previous_keys.json = older keys that are still trusted (array of JWKs),
+        //   so IDs signed before a key rotation keep verifying.
+        //   To stop trusting an old key, delete it from previous_keys.json.
+        const trustedKeys = []; // [{ kid, key }]
+        let keysReady = false;
+
+        function importJwk(jwk) {
             const x = base45Decode(jwk.x);
             const y = base45Decode(jwk.y);
-            window.crypto.subtle.importKey(
+            return window.crypto.subtle.importKey(
                 "jwk", { kty: "EC", crv: "P-256", x: toBase64Url(x), y: toBase64Url(y), ext: true },
                 { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"]
-            ).then(key => { publicKey = key; console.log("Key Loaded"); })
-             .catch(e => alert("Error: public_key.json missing."));
+            ).then(key => ({ kid: jwk.kid || null, key }));
+        }
+
+        const keysLoaded = Promise.all([
+            fetch('public_key.json').then(r => r.json()).then(jwk => [jwk]),
+            fetch('previous_keys.json').then(r => r.ok ? r.json() : []).catch(() => [])
+        ]).then(async ([current, previous]) => {
+            for (const jwk of current.concat(previous)) {
+                try { trustedKeys.push(await importJwk(jwk)); }
+                catch (e) { console.error("Could not load key " + (jwk.kid || "?"), e); }
+            }
+            keysReady = trustedKeys.length > 0;
+            console.log("Keys loaded: " + trustedKeys.map(k => k.kid).join(", "));
+            if (!keysReady) document.getElementById("status").innerText = "Error: no verification key could be loaded.";
+        }).catch(e => {
+            document.getElementById("status").innerText = "Error: public_key.json missing.";
         });
+
+        // Read the key ID (COSE header label 4) from the protected or unprotected header.
+        function getKid(protHeaderBytes, unprotHeader) {
+            let kid = null;
+            try {
+                if (protHeaderBytes.length > 0) kid = getField(decodeCBOR(protHeaderBytes), 4);
+            } catch (e) { /* ignore malformed header; fall back below */ }
+            if (kid == null && unprotHeader && typeof unprotHeader === 'object') kid = getField(unprotHeader, 4);
+            if (kid == null) return null;
+            if (typeof kid === 'string') return kid;
+            try { return new TextDecoder().decode(kid instanceof Uint8Array ? kid : new Uint8Array(kid)); }
+            catch (e) { return null; }
+        }
+
+        // Verify against the key named by kid; if the card has no kid (or an unknown one),
+        // try every trusted key. Returns the kid of the key that verified, or null.
+        async function verifyWithTrustedKeys(signature, toBeSigned, kid) {
+            const named = trustedKeys.filter(k => kid && k.kid === kid);
+            const candidates = named.length ? named : trustedKeys;
+            for (const k of candidates) {
+                const ok = await window.crypto.subtle.verify(
+                    { name: "ECDSA", hash: { name: "SHA-256" } }, k.key, signature, toBeSigned
+                );
+                if (ok) return k.kid || "unnamed key";
+            }
+            return null;
+        }
 
         // --- 4. CAMERA ---
         const video = document.createElement("video");
@@ -183,37 +235,49 @@
 
                 const ToBeSigned = createToBeSigned(protHeaderBytes, payloadBytes);
 
-                if (!publicKey) { alert("Public Key not loaded."); return; }
+                await keysLoaded;
+                if (!keysReady) { alert("Public Key not loaded."); return; }
 
-                const valid = await window.crypto.subtle.verify(
-                    { name: "ECDSA", hash: { name: "SHA-256" } },
-                    publicKey, signature, ToBeSigned
-                );
+                const kid = getKid(protHeaderBytes, cose[1]);
+                const signedBy = await verifyWithTrustedKeys(signature, ToBeSigned, kid);
 
-                const data = decodeCBOR(payloadBytes);
-                document.getElementById("debugInfo").innerText = "RAW: " + JSON.stringify(data);
-
-                // Even if signature is invalid, show data to debug
-                // (In production you might want to hide data if invalid)
-                showResult(valid, data);
+                // Only decode and display the card's contents if the signature is genuine.
+                // A forged card must not show a plausible-looking name or ID.
+                const data = signedBy ? decodeCBOR(payloadBytes) : null;
+                showResult(signedBy, data);
 
             } catch (err) {
                 console.error(err);
                 document.getElementById("status").innerText = "ERROR";
-                alert("Scan Error: " + err.message);
+                alert("Scan Error: " + (err && err.message ? err.message : err));
                 resultCard.style.display = "none";
             }
         }
 
-        function showResult(isValid, data) {
+        function showResult(signedBy, data) {
             canvas.style.display = "none";
             video.pause();
             if(video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
 
             const card = document.getElementById("resultCard");
             const header = document.getElementById("verifyHeader");
+            const rows = card.querySelectorAll(".row");
             card.style.display = "block";
-            
+
+            if (!signedBy) {
+                // Invalid signature: show the warning only, never the card's contents.
+                rows.forEach(r => r.style.display = "none");
+                ["resName", "resRole", "resID", "resIssuer", "resValid"].forEach(id => document.getElementById(id).innerText = "-");
+                document.getElementById("debugInfo").innerText = "";
+                header.innerText = "❌ COUNTERFEIT / INVALID SIG";
+                header.style.color = "#dc3545";
+                card.style.border = "4px solid #dc3545";
+                document.getElementById("status").innerText = "⚠️ SIGNATURE MISMATCH";
+                return;
+            }
+            rows.forEach(r => r.style.display = "");
+            document.getElementById("debugInfo").innerText = "RAW: " + JSON.stringify(data);
+
             // --- DATA DISPLAY ---
             let name = "Unknown";
             const rawName = getField(data, 7);
@@ -243,17 +307,33 @@
             document.getElementById("resRole").innerText = role;
             document.getElementById("resID").innerText = id;
 
-            if (isValid) {
-                header.innerText = "✅ AUTHENTICATED";
-                header.style.color = "#28a745";
-                card.style.border = "2px solid #28a745";
-                document.getElementById("status").innerText = "Verification Successful";
-            } else {
-                header.innerText = "❌ COUNTERFEIT / INVALID SIG";
-                header.style.color = "#dc3545";
-                card.style.border = "4px solid #dc3545";
-                document.getElementById("status").innerText = "⚠️ SIGNATURE MISMATCH";
+            // --- EXPIRY (CWT claim 4: Unix time, end of the "Valid Until" day, Philippine time) ---
+            const exp = getField(data, 4);
+            const validText = typeof exp === "number"
+                ? new Date(exp * 1000).toLocaleDateString("en-US", { timeZone: "Asia/Manila", year: "numeric", month: "long", day: "numeric" })
+                : "Not stated";
+            document.getElementById("resValid").innerText = validText;
+
+            if (typeof exp !== "number") {
+                // Genuine signature, but issued before expiry dates were signed into the QR.
+                header.innerText = "⚠️ NOT VALID: NO EXPIRY DATE";
+                header.style.color = "#b35c00";
+                card.style.border = "4px solid #b35c00";
+                document.getElementById("status").innerText = "Genuine card, but it must be reissued";
+                return;
             }
+            if (Date.now() / 1000 > exp) {
+                header.innerText = "⚠️ EXPIRED";
+                header.style.color = "#b35c00";
+                card.style.border = "4px solid #b35c00";
+                document.getElementById("status").innerText = "Genuine card, expired on " + validText;
+                return;
+            }
+
+            header.innerText = "✅ AUTHENTICATED";
+            header.style.color = "#28a745";
+            card.style.border = "2px solid #28a745";
+            document.getElementById("status").innerText = "Verification Successful (signed with " + signedBy + ")";
         }
     </script>
 </body>
